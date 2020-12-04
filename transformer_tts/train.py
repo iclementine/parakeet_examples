@@ -132,19 +132,32 @@ def main_sp(config, args):
         iteration = loaded_iteration
     
     @rank_zero_only
+    @paddle.fluid.dygraph.no_grad
     def valid():
-        valid_iterator = iter(valid_loader)
         valid_losses = defaultdict(list)
-        text, mel, stop_label = next(valid_iterator)
-        with paddle.no_grad():
+        for i, batch in enumerate(valid_loader):
+            text, mel, stop_label = batch
             outputs = compute_outputs(text, mel, stop_label)
             losses = compute_losses((text, mel, stop_label), outputs)
             for k, v in losses.items():
                 valid_losses[k].append(float(v))
+            
+            if i < 2:
+                for key in ["encoder_attention_weights", "cross_attention_weights"]:
+                    attention_weights = outputs[key]
+                    add_attention_plots(
+                        visualizer, 
+                        f"valid_sentence_{i}_{key}", 
+                        attention_weights, 
+                        iteration)
+
         valid_losses = {k: np.mean(v) for k, v in valid_losses.items()}
         for k, v in valid_losses.items():
             visualizer.add_scalar(f"valid/{k}", v, iteration)
-    
+        # TODO(chenfeiyu): visualize at validation instead of training
+        # TODO(chenfeiyu): display attention and spec to ensure continum
+
+
     @rank_zero_only
     def plot():
         for key in ["encoder_attention_weights", "cross_attention_weights"]:
@@ -181,8 +194,8 @@ def main_sp(config, args):
         # other stuffs
         log_states()
 
-        if iteration % config.training.plot_interval == 0:
-            plot()
+        # if iteration % config.training.plot_interval == 0:
+        #     plot()
 
         if iteration % config.training.valid_interval == 0:
             valid()

@@ -39,10 +39,10 @@ _C.model = CN(
 _C.training = CN(
     dict(
         lr=1e-4, # learning rate
-        drop_n_heads=[[0, 2], [15000, 1], [100000, 0], [200000, 1], [250000, 2]],
-        reduction_factor=[[0, 10], [80000, 4]],
+        drop_n_heads=[[0, 0], [15000, 1]],
+        reduction_factor=[[0, 10], [80000, 1]],
         plot_interval=1000, # plot attention and spectrogram
-        valid_interval=10000, # validation
+        valid_interval=1000, # validation
         save_interval=10000, # checkpoint
         max_iteration=900000, # max iteration to train
     )

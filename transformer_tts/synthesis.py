@@ -13,7 +13,7 @@ from parakeet.utils.display import add_attention_plots
 
 from config import get_cfg_defaults
 
-
+@paddle.fluid.dygraph.no_grad
 def main(config, args):
     paddle.set_device(args.device)
 

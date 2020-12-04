@@ -42,11 +42,10 @@ class Transform(object):
                      [(0, 0), (1, 1)], 
                      mode='constant', 
                      constant_values=[(0, 0), (self.start_value, self.end_value)])
-        #stop_probs = np.ones([mel.shape[1]], dtype=np.int64)
-        stop_probs = np.ones([mel.shape[1]], dtype=np.int64)
-        stop_probs[-1] = 0
+        stop_labels = np.ones([mel.shape[1]], dtype=np.int64)
+        stop_labels[-1] = 2
         # actually this thing can also be done within the model
-        return ids, mel, stop_probs
+        return ids, mel, stop_labels
 
 
 class LJSpeechCollector(object):

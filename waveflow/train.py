@@ -95,19 +95,17 @@ def main_sp(config, args):
         nonlocal iteration
         iteration = loaded_iteration
     
-    # @rank_zero_only
-    # def valid():
-    #     valid_iterator = iter(valid_loader)
-    #     valid_losses = defaultdict(list)
-    #     text, mel, stop_label = next(valid_iterator)
-    #     with paddle.no_grad():
-    #         outputs = compute_outputs(text, mel, stop_label)
-    #         losses = compute_losses((text, mel, stop_label), outputs)
-    #         for k, v in losses.items():
-    #             valid_losses[k].append(float(v))
-    #     valid_losses = {k: np.mean(v) for k, v in valid_losses.items()}
-    #     for k, v in valid_losses.items():
-    #         visualizer.add_scalar(f"valid/{k}", v, iteration)
+    @rank_zero_only
+    def valid():
+        valid_iterator = iter(valid_loader)
+        valid_losses = []
+        mel, wav = next(valid_iterator)
+        with paddle.no_grad():
+            outputs = compute_outputs(mel, wav)
+            loss = compute_losses((mel, wav), outputs)
+            valid_losses.append(float(loss))
+        valid_loss = np.mean(valid_losses)
+        visualizer.add_scalar("valid/loss", valid_loss, iteration)
     
     @rank_zero_only
     def log_states():
@@ -132,8 +130,8 @@ def main_sp(config, args):
         # other stuffs
         log_states()
 
-        # if iteration % config.training.valid_interval == 0:
-        #     valid()
+        if iteration % config.training.valid_interval == 0:
+            valid()
         
         if iteration % config.training.save_interval == 0:
             save()
