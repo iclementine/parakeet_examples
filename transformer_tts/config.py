@@ -40,7 +40,7 @@ _C.training = CN(
     dict(
         lr=1e-4, # learning rate
         drop_n_heads=[[0, 0], [15000, 1]],
-        reduction_factor=[[0, 10], [80000, 1]],
+        reduction_factor=[[0, 10], [80000, 4], [200000, 2]],
         plot_interval=1000, # plot attention and spectrogram
         valid_interval=1000, # validation
         save_interval=10000, # checkpoint

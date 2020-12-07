@@ -1,4 +1,5 @@
 import time
+import logging
 from pathlib import Path
 import numpy as np
 import paddle
@@ -10,11 +11,9 @@ from collections import defaultdict
 import parakeet
 from parakeet.data import dataset
 from parakeet.frontend import English
-from parakeet.models.transformer_tts import TransformerTTS, TransformerTTSLoss
-from parakeet.utils import scheduler
+from parakeet.models.transformer_tts import TransformerTTS, TransformerTTSLoss, AdaptiveTransformerTTSLoss
+from parakeet.utils import scheduler, checkpoint, mp_tools, display
 from parakeet.training.cli import default_argument_parser
-from parakeet.utils.display import add_attention_plots
-from parakeet.utils.mp_tools import rank_zero_only
 
 from config import get_cfg_defaults
 from ljspeech import LJSpeech, LJSpeechCollector, Transform
@@ -80,15 +79,25 @@ def main_sp(config, args):
     drop_n_heads = scheduler.StepWise(config.training.drop_n_heads)
     reduction_factor = scheduler.StepWise(config.training.reduction_factor)
     
-
+    checkpoint_path = args.checkpoint
+    output_dir = Path(args.output).expanduser()
+    output_dir.mkdir(exist_ok=True)
+    checkpoint_dir = Path(output_dir) / "checkpoints"
+    checkpoint_dir.mkdir(exist_ok=True)
+    logger = logging.getLogger(__name__)
+    logger.setLevel("INFO")
+    logger.addHandler(logging.StreamHandler())
+    log_file = output_dir / 'worker_{}.log'.format(dist.get_rank())
+    logger.addHandler(logging.FileHandler(str(log_file)))
     if dist.get_rank() == 0:
-        visualizer = SummaryWriter(logdir=args.output)
-        output_dir = visualizer.logdir
-        checkpoint_dir = Path(output_dir) / "checkpoints"
-    else:
-        visualizer, output_dir, checkpoint_dir = None, None, None
+        visualizer = SummaryWriter(logdir=str(output_dir))
 
     iteration = 0
+    epoch = 0
+
+    epoch += 1
+    if args.nprocs > 1 and args.device=="gpu":
+        train_loader.batch_sampler.set_epoch(epoch)
     iterator = iter(train_loader)
 
     def compute_outputs(text, mel, stop_label):
@@ -103,7 +112,7 @@ def main_sp(config, args):
         return outputs
 
     def compute_losses(inputs, outputs):
-        text, mel, stop_label = inputs
+        _, mel, stop_label = inputs
         mel_target = mel[:, 1:, :]
         stop_label_target = stop_label[:, 1:]
 
@@ -119,23 +128,12 @@ def main_sp(config, args):
             stop_logits[:,:time_steps, :], 
             stop_label_target)
         return losses
-    
-    @rank_zero_only
-    def save():
-        parakeet.utils.io.save_parameters(
-            str(checkpoint_dir), iteration, model, optimizer)
-    
-    def load():
-        loaded_iteration = parakeet.utils.io.load_parameters(
-            model, optimizer, checkpoint_dir=str(checkpoint_dir))
-        nonlocal iteration
-        iteration = loaded_iteration
-    
-    @rank_zero_only
+
+    @mp_tools.rank_zero_only
     @paddle.fluid.dygraph.no_grad
-    def valid():
+    def valid(data_loader):
         valid_losses = defaultdict(list)
-        for i, batch in enumerate(valid_loader):
+        for i, batch in enumerate(data_loader):
             text, mel, stop_label = batch
             outputs = compute_outputs(text, mel, stop_label)
             losses = compute_losses((text, mel, stop_label), outputs)
@@ -143,65 +141,67 @@ def main_sp(config, args):
                 valid_losses[k].append(float(v))
             
             if i < 2:
-                for key in ["encoder_attention_weights", "cross_attention_weights"]:
-                    attention_weights = outputs[key]
-                    add_attention_plots(
-                        visualizer, 
-                        f"valid_sentence_{i}_{key}", 
-                        attention_weights, 
-                        iteration)
-
+                attention_weights = outputs["cross_attention_weights"]
+                display.add_attention_plots(
+                    visualizer, 
+                    f"valid_sentence_{i}_cross_attention_weights", 
+                    attention_weights, 
+                    iteration)
+        # write visual log
         valid_losses = {k: np.mean(v) for k, v in valid_losses.items()}
         for k, v in valid_losses.items():
             visualizer.add_scalar(f"valid/{k}", v, iteration)
-        # TODO(chenfeiyu): visualize at validation instead of training
-        # TODO(chenfeiyu): display attention and spec to ensure continum
 
 
-    @rank_zero_only
-    def plot():
-        for key in ["encoder_attention_weights", "cross_attention_weights"]:
-            attention_weights = outputs[key]
-            add_attention_plots(
-                visualizer, 
-                key, 
-                attention_weights, 
-                iteration)
-    
-    @rank_zero_only
-    def log_states():
+    @mp_tools.rank_zero_only
+    def log_states(losses):
         for k, v in losses.items():
-            visualizer.add_scalar(f"train_loss/{k}", float(v), iteration)
+            visualizer.add_scalar(f"train_loss/{k}", v, iteration)
     
-    load()
+    # resume or load
+    iteration = checkpoint.load_parameters(
+        model, 
+        optimizer, 
+        checkpoint_dir=str(checkpoint_dir), 
+        checkpoint_path=checkpoint_path)
+    
     while iteration <= config.training.max_iteration:
         iteration += 1
+        start = time.time()
         try:
             text, mel, stop_label = next(iterator)
-        except:
+        except StopIteration:
+            # new epoch
+            epoch += 1
+            if args.nprocs > 1 and args.device=="gpu":
+                train_loader.batch_sampler.set_epoch(epoch)
             iterator = iter(train_loader)
             text, mel, stop_label = next(iterator)
+        data_loader_time = time.time() - start
+
         optimizer.clear_grad()
         model.train()
         outputs = compute_outputs(text, mel, stop_label)
         losses = compute_losses((text, mel, stop_label), outputs)
         loss = losses["loss"]
-        print(float(loss))
         loss.backward() 
         optimizer.step()
-        
+        iteration_time = time.time() - start
 
-        # other stuffs
-        log_states()
-
-        # if iteration % config.training.plot_interval == 0:
-        #     plot()
+        losses_np = {k: float(v) for k, v in losses.items()}
+        msg = "Rank: {}, ".format(dist.get_rank())
+        msg += "step: {}, ".format(iteration)
+        msg += "time: {:>.3f}s/{:>.3f}s, ".format(data_loader_time, iteration_time)
+        msg += ', '.join('{}: {:>.6f}'.format(k, v) for k, v in losses_np.items())
+        # print(msg)
+        logger.info(msg)
+        log_states(losses_np)
 
         if iteration % config.training.valid_interval == 0:
-            valid()
+            valid(valid_loader)
         
         if iteration % config.training.save_interval == 0:
-            save()
+            checkpoint.save_parameters(str(checkpoint_dir), iteration, model, optimizer)
 
 def main(config, args):
     if args.nprocs > 1 and args.device == "gpu":
