@@ -38,10 +38,11 @@ def main(config, args):
     drop_n_heads = scheduler.StepWise(config.training.drop_n_heads)
     reduction_factor = scheduler.StepWise(config.training.reduction_factor)
     
-    iteration = parakeet.utils.io.load_parameters(
+    # load latest checkpoint from checkpoint_dir 
+    # or load a specified checkpoint from checkpoint_path
+    iteration = parakeet.utils.checkpoint.load_parameters(
         model, 
-        checkpoint_dir=args.checkpoint_dir,
-        iteration=args.iteration,
+        checkpoint_dir=args.checkpoint_dir, 
         checkpoint_path=args.checkpoint_path)
     model.set_constants(
         reduction_factor=reduction_factor(iteration), 
@@ -60,28 +61,26 @@ def main(config, args):
     output_dir.mkdir(exist_ok=True)
 
     with paddle.no_grad():
-        for sentence in sentences:
+        for i, sentence in enumerate(sentences):
             outputs = model.predict(sentence, verbose=args.verbose)
             mel_output = outputs["mel_output"]
-            cross_attention_weights = outputs["cross_attention_weights"]
+            # cross_attention_weights = outputs["cross_attention_weights"]
             mel_output = paddle.transpose(mel_output, [0, 2, 1]).numpy()[0] #(C, T)
-            
-            np.save(str(output_dir / "scientist"), mel_output)
+            np.save(str(output_dir / f"sentence_{i}"), mel_output)
+            if args.verbose:
+                print("spectrogram saved at {}".format(output_dir / f"sentence_{i}.npy"))
 
 if __name__ == "__main__":
     config = get_cfg_defaults()
 
     parser = argparse.ArgumentParser(description="generate mel spectrogram with TransformerTTS.")
     parser.add_argument("--config", type=str, metavar="FILE", help="extra config to overwrite the default config")
-    parser.add_argument("--checkpoint_dir", type=str, help="path of a checkpoint directory.")
-    parser.add_argument("--iteration", type=int, help="iteration of the checkpoint to load.")
     parser.add_argument("--checkpoint_path", type=str, help="path of the checkpoint to load.")
+    parser.add_argument("--checkpoint_dir", type=str, help="path from which to load the latest checkpoint.")
     parser.add_argument("--input", type=str, help="path of the text sentences")
     parser.add_argument("--output", type=str, help="path to save outputs")
     parser.add_argument("--device", type=str, default="cpu", help="device type to use.")
-    parser.add_argument("--opts", nargs=argparse.REMAINDER,
-        help="options to overwrite --config file and the default config, passing in KEY VALUE pairs"
-    )
+    parser.add_argument("--opts", nargs=argparse.REMAINDER, help="options to overwrite --config file and the default config, passing in KEY VALUE pairs")
     parser.add_argument("-v", "--verbose", action="store_true", help="print msg")
     
     args = parser.parse_args()
