@@ -79,7 +79,7 @@ def main_sp(config, args):
     drop_n_heads = scheduler.StepWise(config.training.drop_n_heads)
     reduction_factor = scheduler.StepWise(config.training.reduction_factor)
     
-    checkpoint_path = args.checkpoint
+    checkpoint_path = args.checkpoint_path
     output_dir = Path(args.output).expanduser()
     output_dir.mkdir(exist_ok=True)
     checkpoint_dir = Path(output_dir) / "checkpoints"

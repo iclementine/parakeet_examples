@@ -14,64 +14,12 @@ from parakeet.frontend import English
 from parakeet.models.transformer_tts import TransformerTTS, TransformerTTSLoss
 from parakeet.utils import scheduler, checkpoint, mp_tools, display
 from parakeet.training.cli import default_argument_parser
+from parakeet.training.experiment import ExperimentBase
 
 from config import get_cfg_defaults
 from ljspeech import LJSpeech, LJSpeechCollector, Transform
 
-class Experiment(object):
-    def __init__(self, config, args):
-        self.config = config
-        self.args = args
-
-    def setup(self):
-        if self.parallel:
-            self.init_parallel()
-
-        self.setup_output_dir()
-        self.dump_config()
-        self.setup_visualizer()
-        self.setup_logger()
-        self.setup_checkpointer()
-        
-        self.setup_dataloader()
-        self.setup_model()
-
-        self.iteration = 0
-        self.epoch = 0
-
-    @property
-    def parallel(self):
-        return self.args.device == "gpu" and self.args.nprocs > 1
-
-    def init_parallel(self):
-        dist.init_parallel_env()
-
-    def save(self):
-        checkpoint.save_parameters(
-            self.checkpoint_dir, self.iteration, self.model, self.optimizer)
-
-    def resume_or_load(self):
-        iteration = checkpoint.load_parameters(
-            self.model, 
-            self.optimizer, 
-            checkpoint_dir=self.checkpoint_dir,
-            checkpoint_path=self.args.checkpoint_path)
-        self.iteration = iteration
-
-    def read_batch(self):
-        try:
-            batch = next(self.iterator)
-        except StopIteration:
-            self.new_epoch()
-            batch = next(self.iterator)
-        return batch
-
-    def new_epoch(self):
-        self.epoch += 1
-        if self.parallel:
-            self.train_loader.batch_sampler.set_epoch(self.epoch)
-        self.iterator = iter(self.train_loader)
-
+class Experiment(ExperimentBase):
     def compute_outputs(self, text, mel, stop_label):
         model_core = self.model._layers if self.parallel else self.model
         model_core.set_constants(
@@ -128,26 +76,6 @@ class Experiment(object):
         if dist.get_rank() == 0:
             for k, v in losses_np.items():
                 self.visualizer.add_scalar(f"train_loss/{k}", v, self.iteration)
-
-    def train(self):
-        self.new_epoch()
-        while self.iteration <= self.config.training.max_iteration:
-            self.iteration += 1
-            self.train_batch()
-
-            if self.iteration % self.config.training.valid_interval == 0:
-                self.valid()
-        
-            if self.iteration % self.config.training.save_interval == 0:
-                self.save()
-    
-    def run(self):
-        self.resume_or_load()
-        try:
-            self.train()
-        except KeyboardInterrupt:
-            self.save()
-            exit(-1)
     
     @mp_tools.rank_zero_only
     @paddle.no_grad()
@@ -172,43 +100,6 @@ class Experiment(object):
         valid_losses = {k: np.mean(v) for k, v in valid_losses.items()}
         for k, v in valid_losses.items():
             self.visualizer.add_scalar(f"valid/{k}", v, self.iteration)
-
-    @mp_tools.rank_zero_only
-    def setup_output_dir(self):
-        # output dir
-        output_dir = Path(self.args.output).expanduser()
-        output_dir.mkdir(exist_ok=True)
-
-        self.output_dir = output_dir
-    
-    @mp_tools.rank_zero_only
-    def setup_checkpointer(self):
-        # checkpoint dir
-        checkpoint_dir = self.output_dir / "checkpoints"
-        checkpoint_dir.mkdir(exist_ok=True)
-
-        self.checkpoint_dir = checkpoint_dir
-
-    @mp_tools.rank_zero_only
-    def setup_visualizer(self):
-        # visualizer
-        visualizer = SummaryWriter(logdir=str(self.output_dir))
-
-        self.visualizer = visualizer
-
-    def setup_logger(self):
-        logger = logging.getLogger(__name__)
-        logger.setLevel("INFO")
-        logger.addHandler(logging.StreamHandler())
-        log_file = self.output_dir / 'worker_{}.log'.format(dist.get_rank())
-        logger.addHandler(logging.FileHandler(str(log_file)))
-
-        self.logger = logger
-
-    @mp_tools.rank_zero_only
-    def dump_config(self):
-        with open(self.output_dir / "config.yaml", 'wt') as f: 
-            print(self.config, file=f)
 
     def setup_model(self):
         config = self.config
