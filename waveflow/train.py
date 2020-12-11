@@ -11,131 +11,122 @@ import parakeet
 from parakeet.data import dataset
 from parakeet.models.waveflow import UpsampleNet, WaveFlow, ConditionalWaveFlow, WaveFlowLoss
 from parakeet.audio import AudioProcessor
-from parakeet.utils import scheduler
+from parakeet.utils import scheduler, mp_tools
 from parakeet.training.cli import default_argument_parser
+from parakeet.training.experiment import ExperimentBase
 from parakeet.utils.mp_tools import rank_zero_only
 
 from config import get_cfg_defaults
 from ljspeech import LJSpeech, LJSpeechClipCollector, LJSpeechCollector
 
 
-def main_sp(config, args):
-    if args.nprocs > 1 and args.device=="gpu":
-        dist.init_parallel_env()
-    ljspeech_dataset = LJSpeech(args.data)
-    valid_set, train_set = dataset.split(ljspeech_dataset, config.data.valid_size)
+class Experiment(ExperimentBase):
+    def setup_model(self):
+        config = self.config
 
-    batch_fn = LJSpeechClipCollector(config.data.clip_frames, config.data.hop_length)
-    
-    if args.nprocs == 1:
-        train_loader = DataLoader(
-            train_set, 
-            batch_size=config.data.batch_size, 
-            shuffle=True, 
-            drop_last=True,
-            collate_fn=batch_fn)
-    else:
-        sampler = DistributedBatchSampler(
-            train_set, 
-            batch_size=config.data.batch_size,
-            num_replicas=dist.get_world_size(),
-            rank=dist.get_rank(),
-            shuffle=True,
-            drop_last=True)
-        train_loader = DataLoader(
-            train_set, batch_sampler=sampler, collate_fn=batch_fn)
+        encoder = UpsampleNet(config.model.upsample_factors)
+        decoder = WaveFlow(
+            n_flows=config.model.n_flows,
+            n_layers=config.model.n_layers,
+            n_group=config.model.n_group,
+            channels=config.model.channels,
+            mel_bands=config.data.n_mels,
+            kernel_size=config.model.kernel_size,
+        )
+        model = ConditionalWaveFlow(encoder, decoder)
 
-    valid_batch_fn = LJSpeechCollector()
-    valid_loader = DataLoader(
-        valid_set, batch_size=config.data.batch_size, collate_fn=valid_batch_fn)
+        if self.parallel > 1:
+            model = paddle.DataParallel(model)
+        optimizer = paddle.optimizer.Adam(2e-4, parameters=model.parameters())
+        criterion = WaveFlowLoss(sigma=config.model.sigma)
 
-    encoder = UpsampleNet(config.model.upsample_factors)
-    decoder = WaveFlow(
-        n_flows=config.model.n_flows,
-        n_layers=config.model.n_layers,
-        n_group=config.model.n_group,
-        channels=config.model.channels,
-        mel_bands=config.data.n_mels,
-        kernel_size=config.model.kernel_size,
-    )
-    model = ConditionalWaveFlow(encoder, decoder)
+        self.model = model
+        self.optimizer = optimizer
+        self.criterion = criterion
 
-    if args.nprocs > 1:
-        model = paddle.DataParallel(model)
-    optimizer = paddle.optimizer.Adam(2e-4, parameters=model.parameters())
-    criterion = WaveFlowLoss(config.model.sigma)
+    def setup_dataloader(self):
+        config = self.config
+        args = self.args
 
-    if dist.get_rank() == 0:
-        visualizer = SummaryWriter(logdir=args.output)
-        output_dir = visualizer.logdir
-        checkpoint_dir = Path(output_dir) / "checkpoints"
-    else:
-        visualizer, output_dir, checkpoint_dir = None, None, None
+        ljspeech_dataset = LJSpeech(args.data)
+        valid_set, train_set = dataset.split(ljspeech_dataset, config.data.valid_size)
 
-    iteration = 0
-    iterator = iter(train_loader)
+        batch_fn = LJSpeechClipCollector(config.data.clip_frames, config.data.hop_length)
+        
+        if not self.parallel:
+            train_loader = DataLoader(
+                train_set, 
+                batch_size=config.data.batch_size, 
+                shuffle=True, 
+                drop_last=True,
+                collate_fn=batch_fn)
+        else:
+            sampler = DistributedBatchSampler(
+                train_set, 
+                batch_size=config.data.batch_size,
+                num_replicas=dist.get_world_size(),
+                rank=dist.get_rank(),
+                shuffle=True,
+                drop_last=True)
+            train_loader = DataLoader(
+                train_set, batch_sampler=sampler, collate_fn=batch_fn)
 
-    def compute_outputs(mel, wav):
+        valid_batch_fn = LJSpeechCollector()
+        valid_loader = DataLoader(
+            valid_set, batch_size=config.data.batch_size, collate_fn=valid_batch_fn)
+        
+        self.train_loader = train_loader
+        self.valid_loader = valid_loader
+
+    def compute_outputs(self, mel, wav):
         # model_core = model._layers if isinstance(model, paddle.DataParallel) else model
-        z, log_det_jocobian = model(wav, mel)
+        z, log_det_jocobian = self.model(wav, mel)
         return z, log_det_jocobian
 
-    def compute_losses(inputs, outputs):
-        loss = criterion(outputs)
+    def compute_losses(self, outputs):
+        loss = self.criterion(outputs)
         return loss
-    
-    @rank_zero_only
-    def save():
-        parakeet.utils.io.save_parameters(
-            str(checkpoint_dir), iteration, model, optimizer)
-    
-    def load():
-        loaded_iteration = parakeet.utils.io.load_parameters(
-            model, optimizer, checkpoint_dir=str(checkpoint_dir))
-        nonlocal iteration
-        iteration = loaded_iteration
-    
-    @rank_zero_only
+
+    def train_batch(self):
+        start = time.time()
+        batch = self.read_batch()
+        data_loader_time = time.time() - start
+
+        self.model.train()
+        self.optimizer.clear_grad()
+        mel, wav = batch
+        outputs = self.compute_outputs(mel, wav)
+        loss = self.compute_losses(outputs)
+        loss.backward() 
+        self.optimizer.step()
+        iteration_time = time.time() - start
+
+        loss_value = float(loss)
+        msg = "Rank: {}, ".format(dist.get_rank())
+        msg += "step: {}, ".format(self.iteration)
+        msg += "time: {:>.3f}s/{:>.3f}s, ".format(data_loader_time, iteration_time)
+        msg += "loss: {:>.6f}".format(loss_value)
+        self.logger.info(msg)
+        self.visualizer.add_scalar("train/loss", loss_value, global_step=self.iteration)
+
+    @mp_tools.rank_zero_only
     @paddle.no_grad()
-    def valid():
-        valid_iterator = iter(valid_loader)
+    def valid(self):
+        valid_iterator = iter(self.valid_loader)
         valid_losses = []
         mel, wav = next(valid_iterator)
-        with paddle.no_grad():
-            outputs = compute_outputs(mel, wav)
-            loss = compute_losses((mel, wav), outputs)
-            valid_losses.append(float(loss))
+        outputs = self.compute_outputs(mel, wav)
+        loss = self.compute_losses(outputs)
+        valid_losses.append(float(loss))
         valid_loss = np.mean(valid_losses)
-        visualizer.add_scalar("valid/loss", valid_loss, iteration)
-    
-    @rank_zero_only
-    def log_states():
-        visualizer.add_scalar(f"train_loss/loss", float(loss), iteration)
-    
-    load()
-    while iteration <= config.training.max_iteration:
-        iteration += 1
-        try:
-            mel, wav= next(iterator)
-        except:
-            iterator = iter(train_loader)
-            mel, wav = next(iterator)
-        optimizer.clear_grad()
-        model.train()
-        outputs = compute_outputs(mel, wav)
-        loss = compute_losses((mel, wav), outputs)
-        print(float(loss))
-        loss.backward() 
-        optimizer.step()
+        self.visualizer.add_scalar("valid/loss", valid_loss, global_step=self.iteration)
 
-        # other stuffs
-        log_states()
 
-        if iteration % config.training.valid_interval == 0:
-            valid()
-        
-        if iteration % config.training.save_interval == 0:
-            save()
+def main_sp(config, args):
+    exp = Experiment(config, args)
+    exp.setup()
+    exp.run()
+
 
 def main(config, args):
     if args.nprocs > 1 and args.device == "gpu":
