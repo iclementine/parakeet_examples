@@ -72,7 +72,7 @@ class Experiment(ExperimentBase):
             display.add_attention_plots(
                 self.visualizer, 
                 f"valid_sentence_{i}_alignments", 
-                attention_weights, 
+                attention_weights[0], 
                 self.iteration)
 
         # write visual log
