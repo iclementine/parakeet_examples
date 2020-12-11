@@ -29,7 +29,7 @@ _C.model = CN(
 
 _C.training = CN(
     dict(
-        lr=1e-4, # learning rates
+        lr=2e-4, # learning rates
         valid_interval=1000, # validation
         save_interval=10000, # checkpoint
         max_iteration=3000000, # max iteration to train

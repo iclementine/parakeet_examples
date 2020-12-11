@@ -37,7 +37,7 @@ class Experiment(ExperimentBase):
 
         if self.parallel > 1:
             model = paddle.DataParallel(model)
-        optimizer = paddle.optimizer.Adam(2e-4, parameters=model.parameters())
+        optimizer = paddle.optimizer.Adam(config.training.lr, parameters=model.parameters())
         criterion = WaveFlowLoss(sigma=config.model.sigma)
 
         self.model = model
