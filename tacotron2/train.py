@@ -63,8 +63,8 @@ class Experiment(ExperimentBase):
         valid_losses = defaultdict(list)
         for i, batch in enumerate(self.valid_loader):
             texts, mels, text_lens, output_lens, stop_tokens = batch
-            outputs = model(texts, text_lens, mels, output_lens)
-            losses = compute_losses(batch, outputs)
+            outputs = self.model(texts, mels, text_lens, output_lens)
+            losses = self.compute_losses(batch, outputs)
             for k, v in losses.items():
                 valid_losses[k].append(float(v))
 
@@ -77,6 +77,13 @@ class Experiment(ExperimentBase):
 
         # write visual log
         valid_losses = {k: np.mean(v) for k, v in valid_losses.items()}
+
+        # logging
+        msg = "Valid: "
+        msg += "step: {}, ".format(self.iteration)
+        msg += ', '.join('{}: {:>.6f}'.format(k, v) for k, v in valid_losses.items())
+        self.logger.info(msg)
+
         for k, v in valid_losses.items():
             self.visualizer.add_scalar(f"valid/{k}", v, self.iteration)
 
