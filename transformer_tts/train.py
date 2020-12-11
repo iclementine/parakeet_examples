@@ -162,7 +162,7 @@ class Experiment(ExperimentBase):
 
             if i < 2:
                 attention_weights = outputs["cross_attention_weights"]
-                display.add_attention_plots(
+                display.add_multi_attention_plots(
                     self.visualizer, 
                     f"valid_sentence_{i}_cross_attention_weights", 
                     attention_weights, 
