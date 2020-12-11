@@ -1,5 +1,6 @@
 import time
 from pathlib import Path
+import math
 import numpy as np
 import paddle
 from paddle import distributed as dist
@@ -9,7 +10,7 @@ from collections import defaultdict
 
 import parakeet
 from parakeet.data import dataset
-from parakeet.models.waveflow import UpsampleNet, WaveFlow, ConditionalWaveFlow, WaveFlowLoss
+from parakeet.models.wavenet import UpsampleNet, WaveNet, ConditionalWavenet
 from parakeet.audio import AudioProcessor
 from parakeet.utils import scheduler, mp_tools
 from parakeet.training.cli import default_argument_parser
@@ -25,24 +26,31 @@ class Experiment(ExperimentBase):
         config = self.config
 
         encoder = UpsampleNet(config.model.upsample_factors)
-        decoder = WaveFlow(
-            n_flows=config.model.n_flows,
-            n_layers=config.model.n_layers,
-            n_group=config.model.n_group,
-            channels=config.model.channels,
-            mel_bands=config.data.n_mels,
-            kernel_size=config.model.kernel_size,
-        )
-        model = ConditionalWaveFlow(encoder, decoder)
+        decoder = WaveNet(n_stack=config.model.n_stack, 
+                          n_loop=config.model.n_loop,
+                          residual_channels=config.model.residual_channels,
+                          output_dim=config.model.output_dim,
+                          condition_dim=config.data.n_mels,
+                          filter_size=config.model.filter_size,
+                          loss_type=config.model.loss_type,
+                          log_scale_min=config.model.log_scale_min)
+        model = ConditionalWavenet(encoder, decoder)
 
         if self.parallel > 1:
             model = paddle.DataParallel(model)
-        optimizer = paddle.optimizer.Adam(config.training.lr, parameters=model.parameters())
-        criterion = WaveFlowLoss(sigma=config.model.sigma)
+
+        lr_scheduler = paddle.optimizer.lr.StepDecay(
+            config.training.lr, 
+            config.training.anneal_interval, 
+            config.training.anneal_rate)
+        optimizer = paddle.optimizer.Adam(
+            lr_scheduler,
+            parameters=model.parameters(),
+            grad_clip=paddle.nn.ClipGradByGlobalNorm(config.training.gradient_max_norm))
 
         self.model = model
+        self.model_core = model._layer if self.parallel else model
         self.optimizer = optimizer
-        self.criterion = criterion
 
     def setup_dataloader(self):
         config = self.config
@@ -51,8 +59,18 @@ class Experiment(ExperimentBase):
         ljspeech_dataset = LJSpeech(args.data)
         valid_set, train_set = dataset.split(ljspeech_dataset, config.data.valid_size)
 
-        batch_fn = LJSpeechClipCollector(config.data.clip_frames, config.data.hop_length)
+        # convolutional net's causal padding size
+        context_size = config.model.n_stack \
+                      * sum([(config.model.filter_size - 1) * 2**i for i in range(config.model.n_loop)]) \
+                      + 1
+        context_frames = context_size // config.data.hop_length
+
+        # frames used to compute loss
+        frames_per_second = config.data.sample_rate // config.data.hop_length
+        train_clip_frames = math.ceil(config.data.train_clip_seconds * frames_per_second)
         
+        num_frames = train_clip_frames + context_frames
+        batch_fn = LJSpeechClipCollector(num_frames, config.data.hop_length)
         if not self.parallel:
             train_loader = DataLoader(
                 train_set, 
@@ -64,8 +82,6 @@ class Experiment(ExperimentBase):
             sampler = DistributedBatchSampler(
                 train_set, 
                 batch_size=config.data.batch_size,
-                num_replicas=dist.get_world_size(),
-                rank=dist.get_rank(),
                 shuffle=True,
                 drop_last=True)
             train_loader = DataLoader(
@@ -78,15 +94,6 @@ class Experiment(ExperimentBase):
         self.train_loader = train_loader
         self.valid_loader = valid_loader
 
-    def compute_outputs(self, mel, wav):
-        # model_core = model._layers if isinstance(model, paddle.DataParallel) else model
-        z, log_det_jocobian = self.model(wav, mel)
-        return z, log_det_jocobian
-
-    def compute_losses(self, outputs):
-        loss = self.criterion(outputs)
-        return loss
-
     def train_batch(self):
         start = time.time()
         batch = self.read_batch()
@@ -94,9 +101,10 @@ class Experiment(ExperimentBase):
 
         self.model.train()
         self.optimizer.clear_grad()
-        mel, wav = batch
-        outputs = self.compute_outputs(mel, wav)
-        loss = self.compute_losses(outputs)
+        mel, wav, audio_starts = batch
+        
+        y = self.model(wav, mel, audio_starts)
+        loss = self.model.loss(y, wav)
         loss.backward() 
         self.optimizer.step()
         iteration_time = time.time() - start
@@ -114,9 +122,9 @@ class Experiment(ExperimentBase):
     def valid(self):
         valid_iterator = iter(self.valid_loader)
         valid_losses = []
-        mel, wav = next(valid_iterator)
-        outputs = self.compute_outputs(mel, wav)
-        loss = self.compute_losses(outputs)
+        mel, wav, audio_starts = next(valid_iterator)
+        y = self.model(wav, mel, audio_starts)
+        loss = self.model.loss(y, wav)
         valid_losses.append(float(loss))
         valid_loss = np.mean(valid_losses)
         self.visualizer.add_scalar("valid/loss", valid_loss, global_step=self.iteration)

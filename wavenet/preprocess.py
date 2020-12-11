@@ -10,7 +10,8 @@ import pandas as pd
 from paddle.io import Dataset
 from parakeet.data import batch_spec, batch_wav
 from parakeet.datasets import LJSpeechMetaData
-from parakeet.audio import AudioProcessor, LogMagnitude
+from parakeet.audio import AudioProcessor
+from parakeet.audio.spec_normalizer import UnitMagnitude
 
 from config import get_cfg_defaults
 
@@ -22,8 +23,8 @@ class Transform(object):
         self.win_length = win_length
         self.hop_length = hop_length
         self.n_mels = n_mels
-
-        self.spec_normalizer = LogMagnitude(min=1e-5)
+        
+        self.spec_normalizer = UnitMagnitude(min=1e-5)
 
     def __call__(self, example):
         wav_path, _, _ = example
