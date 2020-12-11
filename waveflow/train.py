@@ -96,6 +96,7 @@ def main_sp(config, args):
         iteration = loaded_iteration
     
     @rank_zero_only
+    @paddle.no_grad()
     def valid():
         valid_iterator = iter(valid_loader)
         valid_losses = []

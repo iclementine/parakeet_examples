@@ -20,6 +20,78 @@ from config import get_cfg_defaults
 from ljspeech import LJSpeech, LJSpeechCollector, Transform
 
 class Experiment(ExperimentBase):
+    def setup_model(self):
+        config = self.config
+        frontend = English()
+        model = TransformerTTS(
+            frontend, 
+            d_encoder=config.model.d_encoder,
+            d_decoder=config.model.d_decoder,
+            d_mel=config.data.d_mel,
+            n_heads=config.model.n_heads,
+            d_ffn=config.model.d_ffn,
+            encoder_layers=config.model.encoder_layers,
+            decoder_layers=config.model.decoder_layers,
+            d_prenet=config.model.d_prenet,
+            d_postnet=config.model.d_postnet,
+            postnet_layers=config.model.postnet_layers,
+            postnet_kernel_size=config.model.postnet_kernel_size,
+            max_reduction_factor=config.model.max_reduction_factor,
+            decoder_prenet_dropout=config.model.decoder_prenet_dropout,
+            dropout=config.model.dropout)
+        if self.parallel:
+            model = paddle.DataParallel(model)
+        optimizer = paddle.optimizer.Adam(
+            learning_rate=1e-4,
+            beta1=0.9,
+            beta2=0.98,
+            epsilon=1e-9,
+            parameters=model.parameters()
+        )
+        criterion = TransformerTTSLoss(config.model.stop_loss_scale)
+        drop_n_heads = scheduler.StepWise(config.training.drop_n_heads)
+        reduction_factor = scheduler.StepWise(config.training.reduction_factor)
+
+        self.model = model
+        self.optimizer = optimizer
+        self.criterion = criterion
+        self.drop_n_heads = drop_n_heads
+        self.reduction_factor = reduction_factor
+
+    def setup_dataloader(self):
+        args = self.args
+        config = self.config
+
+        ljspeech_dataset = LJSpeech(args.data)
+        transform = Transform(config.data.mel_start_value, config.data.mel_end_value)
+        ljspeech_dataset = dataset.TransformDataset(ljspeech_dataset, transform)
+        valid_set, train_set = dataset.split(ljspeech_dataset, config.data.valid_size)
+        batch_fn = LJSpeechCollector(padding_idx=config.data.padding_idx)
+        
+        if not self.parallel:
+            train_loader = DataLoader(
+                train_set, 
+                batch_size=config.data.batch_size, 
+                shuffle=True, 
+                drop_last=True,
+                collate_fn=batch_fn)
+        else:
+            sampler = DistributedBatchSampler(
+                train_set, 
+                batch_size=config.data.batch_size,
+                num_replicas=dist.get_world_size(),
+                rank=dist.get_rank(),
+                shuffle=True,
+                drop_last=True)
+            train_loader = DataLoader(
+                train_set, batch_sampler=sampler, collate_fn=batch_fn)
+
+        valid_loader = DataLoader(
+            valid_set, batch_size=config.data.batch_size, collate_fn=batch_fn)
+
+        self.train_loader = train_loader
+        self.valid_loader = valid_loader
+
     def compute_outputs(self, text, mel, stop_label):
         model_core = self.model._layers if self.parallel else self.model
         model_core.set_constants(
@@ -101,88 +173,19 @@ class Experiment(ExperimentBase):
         for k, v in valid_losses.items():
             self.visualizer.add_scalar(f"valid/{k}", v, self.iteration)
 
-    def setup_model(self):
-        config = self.config
-        frontend = English()
-        model = TransformerTTS(
-            frontend, 
-            d_encoder=config.model.d_encoder,
-            d_decoder=config.model.d_decoder,
-            d_mel=config.data.d_mel,
-            n_heads=config.model.n_heads,
-            d_ffn=config.model.d_ffn,
-            encoder_layers=config.model.encoder_layers,
-            decoder_layers=config.model.decoder_layers,
-            d_prenet=config.model.d_prenet,
-            d_postnet=config.model.d_postnet,
-            postnet_layers=config.model.postnet_layers,
-            postnet_kernel_size=config.model.postnet_kernel_size,
-            max_reduction_factor=config.model.max_reduction_factor,
-            decoder_prenet_dropout=config.model.decoder_prenet_dropout,
-            dropout=config.model.dropout)
-        if self.parallel:
-            model = paddle.DataParallel(model)
-        optimizer = paddle.optimizer.Adam(
-            learning_rate=1e-4,
-            beta1=0.9,
-            beta2=0.98,
-            epsilon=1e-9,
-            parameters=model.parameters()
-        )
-        criterion = TransformerTTSLoss(config.model.stop_loss_scale)
-        drop_n_heads = scheduler.StepWise(config.training.drop_n_heads)
-        reduction_factor = scheduler.StepWise(config.training.reduction_factor)
-
-        self.model = model
-        self.optimizer = optimizer
-        self.criterion = criterion
-        self.drop_n_heads = drop_n_heads
-        self.reduction_factor = reduction_factor
-
-    def setup_dataloader(self):
-        args = self.args
-        config = self.config
-
-        ljspeech_dataset = LJSpeech(args.data)
-        transform = Transform(config.data.mel_start_value, config.data.mel_end_value)
-        ljspeech_dataset = dataset.TransformDataset(ljspeech_dataset, transform)
-        valid_set, train_set = dataset.split(ljspeech_dataset, config.data.valid_size)
-        batch_fn = LJSpeechCollector(padding_idx=config.data.padding_idx)
-        
-        if not self.parallel:
-            train_loader = DataLoader(
-                train_set, 
-                batch_size=config.data.batch_size, 
-                shuffle=True, 
-                drop_last=True,
-                collate_fn=batch_fn)
-        else:
-            sampler = DistributedBatchSampler(
-                train_set, 
-                batch_size=config.data.batch_size,
-                num_replicas=dist.get_world_size(),
-                rank=dist.get_rank(),
-                shuffle=True,
-                drop_last=True)
-            train_loader = DataLoader(
-                train_set, batch_sampler=sampler, collate_fn=batch_fn)
-
-        valid_loader = DataLoader(
-            valid_set, batch_size=config.data.batch_size, collate_fn=batch_fn)
-
-        self.train_loader = train_loader
-        self.valid_loader = valid_loader
 
 def main_sp(config, args):
     exp = Experiment(config, args)
     exp.setup()
     exp.run()
 
+
 def main(config, args):
     if args.nprocs > 1 and args.device == "gpu":
         dist.spawn(main_sp, args=(config, args), nprocs=args.nprocs)
     else:
         main_sp(config, args)
+
 
 if __name__ == "__main__":
     config = get_cfg_defaults()
