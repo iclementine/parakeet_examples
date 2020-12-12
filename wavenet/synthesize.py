@@ -5,15 +5,14 @@ import os
 from pathlib import Path
 import paddle
 import parakeet
-from parakeet.models.waveflow import UpsampleNet, WaveFlow, ConditionalWaveFlow
+from parakeet.models.wavenet import UpsampleNet, WaveNet, ConditionalWaveNet
 from parakeet.utils import layer_tools, checkpoint
-
 
 from config import get_cfg_defaults
 
 def main(config, args):
     paddle.set_device(args.device)
-    model = ConditionalWaveFlow.from_pretrained(config, args.checkpoint_path)
+    model = ConditionalWaveNet.from_pretrained(config, args.checkpoint_path)
     layer_tools.recursively_remove_weight_norm(model)
     model.eval()
 

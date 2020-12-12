@@ -24,17 +24,16 @@ from ljspeech import LJSpeech, LJSpeechClipCollector, LJSpeechCollector
 class Experiment(ExperimentBase):
     def setup_model(self):
         config = self.config
-
-        encoder = UpsampleNet(config.model.upsample_factors)
-        decoder = WaveNet(n_stack=config.model.n_stack, 
-                          n_loop=config.model.n_loop,
-                          residual_channels=config.model.residual_channels,
-                          output_dim=config.model.output_dim,
-                          condition_dim=config.data.n_mels,
-                          filter_size=config.model.filter_size,
-                          loss_type=config.model.loss_type,
-                          log_scale_min=config.model.log_scale_min)
-        model = ConditionalWavenet(encoder, decoder)
+        model = ConditionalWavenet(
+            upsample_factors=config.model.upsample_factors,
+            n_stack=config.model.n_stack, 
+            n_loop=config.model.n_loop,
+            residual_channels=config.model.residual_channels,
+            output_dim=config.model.output_dim,
+            n_mels=config.data.n_mels,
+            filter_size=config.model.filter_size,
+            loss_type=config.model.loss_type,
+            log_scale_min=config.model.log_scale_min)
 
         if self.parallel > 1:
             model = paddle.DataParallel(model)
