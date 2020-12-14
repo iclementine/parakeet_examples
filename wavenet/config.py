@@ -4,7 +4,7 @@ _C = CN()
 _C.data = CN(
     dict(
         batch_size=8, # batch size
-        valid_size=64, # the first N examples are reserved for validation
+        valid_size=16, # the first N examples are reserved for validation
         sample_rate=22050, # Hz, sample rate
         n_fft=2048, # fft frame size
         win_length=1024, # window size
