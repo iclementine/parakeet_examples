@@ -70,7 +70,7 @@ class Experiment(ExperimentBase):
 
         valid_batch_fn = LJSpeechCollector()
         valid_loader = DataLoader(
-            valid_set, batch_size=config.data.batch_size, collate_fn=valid_batch_fn)
+            valid_set, batch_size=1, collate_fn=valid_batch_fn)
         
         self.train_loader = train_loader
         self.valid_loader = valid_loader
