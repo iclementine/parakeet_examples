@@ -10,7 +10,7 @@ from collections import defaultdict
 
 import parakeet
 from parakeet.data import dataset
-from parakeet.models.wavenet import UpsampleNet, WaveNet, ConditionalWavenet
+from parakeet.models.wavenet import UpsampleNet, WaveNet, ConditionalWaveNet
 from parakeet.audio import AudioProcessor
 from parakeet.utils import scheduler, mp_tools
 from parakeet.training.cli import default_argument_parser
@@ -24,7 +24,7 @@ from ljspeech import LJSpeech, LJSpeechClipCollector, LJSpeechCollector
 class Experiment(ExperimentBase):
     def setup_model(self):
         config = self.config
-        model = ConditionalWavenet(
+        model = ConditionalWaveNet(
             upsample_factors=config.model.upsample_factors,
             n_stack=config.model.n_stack, 
             n_loop=config.model.n_loop,
