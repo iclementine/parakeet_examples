@@ -74,6 +74,16 @@ class Experiment(ExperimentBase):
                 f"valid_sentence_{i}_alignments", 
                 attention_weights[0], 
                 self.iteration)
+            display.add_spectrogram_plots(
+                self.visualizer, 
+                f"valid_sentence_{i}_target_spectrogram", 
+                mels[0], 
+                self.iteration)
+            display.add_spectrogram_plots(
+                self.visualizer, 
+                f"valid_sentence_{i}_predicted_spectrogram", 
+                outputs['mel_outputs_postnet'][0], 
+                self.iteration)
 
         # write visual log
         valid_losses = {k: np.mean(v) for k, v in valid_losses.items()}
